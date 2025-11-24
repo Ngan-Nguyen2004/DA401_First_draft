@@ -1,0 +1,1172 @@
+---
+title: "Research paper_First draft"
+author: "Ngan Nguyen"
+date: "2025-11-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(tidyr)
+library(tidyverse)
+library(purrr)
+library(stringr)
+library(scales)
+library(patchwork)
+library(fixest)
+library(broom)
+library(tibble)
+library(sandwich)
+library(lmtest)
+
+
+
+```
+
+# I/ Data Cleaning
+```{r, message = FALSE}
+
+total_intstudents_us <- read.csv("total_intstudents_us.csv")
+
+```
+
+## 1/ Total students studying in the United States from 2014 to 2023
+```{r}
+# Remove columns & row with only empty
+total_intstudents_us_new <- total_intstudents_us %>%
+  select(where(~ any(!is.na(.)))) %>%
+  filter(rowSums(is.na(.)) < ncol(.))
+# Rename the first cell in first column to "Academic_year"
+total_intstudents_us_new[1,1] <- "Academic_year"
+total_intstudents_us_new[2,1] <- "Academic_level"
+colnames(total_intstudents_us_new)[1] <- "Country"
+# Drop any columns that have "OPT" or "Other" or "Non-Degree"
+total_intstudents_us_new <- total_intstudents_us_new[, !(total_intstudents_us_new[2, ] %in% c("Other", "OPT", "Non-Degree"))]
+# Loop through the columns (2nd, 5th, etc.) and update them
+for (j in seq(2, ncol(total_intstudents_us_new), by = 2)) {
+  value <- total_intstudents_us_new[1, j]  # Get the value from the current column (e.g., Year_1, Year_4)
+  
+# Assign the value to the next two columns (spread across Year_2, Year_3, Year_5, Year_6)
+  if (j + 1 <= ncol(total_intstudents_us_new)) total_intstudents_us_new[1, j + 1] <- value}
+
+
+```
+
+
+
+```{r}
+# Convert the data set
+# Take first two column for transpose
+header_rows <- total_intstudents_us_new[1:2, ]
+header_tidy <- as.data.frame(t(header_rows), stringsAsFactors = FALSE)
+names(header_tidy) <- c("Academic_year", "Academic_level")
+header_tidy <- header_tidy[-1, ] |> as_tibble()
+
+# Step 2: Extract academic years and levels from the first two rows
+academic_years <- as.character(total_intstudents_us_new[1, ])
+academic_levels <- as.character(total_intstudents_us_new[2, ])
+
+# Step 3: Create combined column names
+col_names <- paste0(academic_years, "_", academic_levels)
+
+# Step 4: Assign proper column names
+names(total_intstudents_us_new) <- col_names
+
+# Step 5: Remove the first two rows (since they are headers)
+data_clean <- total_intstudents_us_new[-c(1, 2), ]
+
+# Step 6: Rename the first column as "Country"
+names(data_clean)[1] <- "Country"
+
+# Step 7: Convert from wide to long format
+data_long <- data_clean %>%
+  pivot_longer(
+    cols = -Country,
+    names_to = "Year_Level",
+    values_to = "total_students_each_year"
+  )
+
+# Step 8: Split combined column into Academic_year and Academic_level
+data_long <- data_long %>%
+  separate(Year_Level, into = c("Academic_year", "Academic_level"), sep = "_")
+
+# Step 9: (Optional) Join with header_tidy to ensure matching year/level pairs
+final_data <- data_long %>%
+  inner_join(header_tidy, by = c("Academic_year", "Academic_level"))
+
+# Step 10: Reorder columns
+final_data <- final_data %>%
+  select(Country, Academic_year, Academic_level, total_students_each_year)
+# Step 11: make sure to add the study destination "united_states" for this data set
+final_data <- final_data %>%
+  mutate(study_destination = "United States")
+# Filter only have asian countries
+asian_countries <- c(
+  "China", "India", "Kazakhstan", "Vietnam", "Afghanistan", "Bangladesh", "Bhutan", "Brunei", "Cambodia", "Indonesia", "Laos", "Malaysia", "Maldives", "Burma/Myanmar", "Nepal", "Pakistan", "Philippines", "Singapore", "Sri Lanka", "Thailand", "Timor-Leste", "South Korea", "North Korea", "Hong Kong", "Japan", "Mongolia", "Kyrgyzstan", "Tajikistan", "Turkmenistan", "Uzbekistan", "Macau"
+)
+
+# Assuming your final combined dataset is called combined_data
+final_data <- final_data %>%
+  filter(Country %in% asian_countries)
+# Convert the column "total_students_each_year" to be value
+final_data$total_students_each_year <- as.integer(final_data$total_students_each_year)
+
+# Group by Academic_year and Country, then sum total_students_each_year
+final_data_us_by_aclevel <- final_data %>%
+  group_by(Academic_year, Country,study_destination) %>%
+  summarise(total_students = sum(total_students_each_year, na.rm = TRUE))
+
+# Convert to the ending year (e.g. "2001", "2002", etc.)
+final_data_us_by_aclevel$Academic_year <- as.numeric(sub(".*/", "20", final_data_us_by_aclevel$Academic_year))
+# Add destination column (United States)for merging later
+final_data_us_by_aclevel <- final_data_us_by_aclevel %>%
+  mutate(destination = "United States")
+
+```
+
+
+
+
+## 2/ Total students studying in Europe Country from 2014 to 2023
+
+
+```{r, message = FALSE, warning=FALSE}
+# Define folder
+folder_path <- "~/Downloads/studydestination_europe"
+
+# List all CSV files (use full paths so R reads from the correct folder)
+files <- list.files(path = folder_path, pattern = "\\.csv$", full.names = TRUE)
+
+# Function to clean each dataset
+clean_europe_data1 <- function(file) {
+  # Read the main data (skip metadata)
+  europe_data1 <- read.csv(file, skip = 9)
+  
+  # Keep only the first 43 rows
+  europe_data1 <- europe_data1[1:43, , drop = FALSE]
+  
+  # Remove odd-numbered columns starting from the 3rd
+  cols_to_remove1 <- seq(3, ncol(europe_data1), by = 2)
+  europe_data1 <- europe_data1[, -cols_to_remove1, drop = FALSE]
+  
+  # Read the raw file (no skip) to extract country and academic level
+  raw_data1 <- read.csv(file, header = FALSE)
+  
+  # Extract metadata
+  country_name1 <- as.character(raw_data1[7, 3])
+  academic_level1 <- as.character(raw_data1[9, 3])
+  
+  # Safety check in case file has fewer than 11 columns
+  max_col <- min(11, ncol(europe_data1))
+  if (ncol(europe_data1) >= 2) {
+    new_colnames1 <- as.character(unlist(europe_data1[1, 2:max_col]))
+    names(europe_data1)[2:max_col] <- new_colnames1
+  }
+  
+  # Remove that first row (used for column names) and GEO labels and total of European Union
+  europe_data1 <- europe_data1[-c(1:4), , drop = FALSE]
+  
+  # --- Rename first column to "Country" ---
+ cols_to_convert <- 2:min(11, ncol(europe_data1))
+  europe_data1[, cols_to_convert] <- lapply(
+    europe_data1[, cols_to_convert],
+    function(x) {
+      # Remove commas, trim spaces
+      x_clean <- gsub(",", "", x)
+      x_clean <- trimws(x_clean)
+      # Convert to numeric
+      x_num <- as.numeric(x_clean)
+      # Replace NA with 0
+      x_num[is.na(x_num)] <- 0
+      return(x_num)
+    }
+  )
+  # Add new columns
+  europe_data1$country <- country_name1
+  europe_data1$academic_level <- academic_level1
+  europe_data1$source_file <- basename(file)
+
+  return(europe_data1)
+}
+# Exclude certains countries withh missing value more than half of periods (2014 to 2023)
+remove_list <- c(
+  "Bosnia and Herzegovina",
+  "Montenegro",
+  "Georgia",
+  "Albania",
+  "United Kingdom",
+  "Netherlands"
+)
+# Apply cleaning and remove unwanted countries
+all_europe_data1 <- lapply(
+  files,
+  function(f) {
+    df <- clean_europe_data1(f)
+    df[!(df$X %in% remove_list), ]
+  }
+)
+
+```
+
+
+
+
+
+* Sum up by year, academic level, X (country of destination) and country of origin
+
+```{r, message=FALSE}
+# Sum up by year, academic level, X (country of destination) and country
+all_summarized1 <- lapply(
+  all_europe_data1,
+  function(df) {
+    df %>%
+      rename(destination = X) %>%   
+      pivot_longer(
+        cols = 2:11,
+        names_to = "Academic_year",
+        values_to = "total_students"
+      ) %>%
+      group_by(Academic_year, country, destination) %>%   # <-- use new name
+      summarise(total_students_each_year = sum(total_students, na.rm = TRUE)) %>%
+      ungroup()
+  }
+)
+```
+
+```{r}
+
+```
+
+
+* Sum up by year, academic level, and country of origin
+
+```{r message = FALSE}
+# Sum up by year and academic level, country
+all_summarized <- lapply(all_europe_data1,function(df) {
+  df %>%
+    pivot_longer(
+      cols = 2:11,
+      names_to = "Academic_year",
+      values_to = "total_students"
+    ) %>%
+    group_by(Academic_year, country) %>%
+    summarise(total_students_each_year = sum(total_students, na.rm = TRUE)) %>%
+    ungroup()
+})
+```
+
+
+
+
+```{r}
+# Put all data in one place (one dataset) together
+final_data_europe_by_aclevel <- bind_rows(all_summarized1)
+final_data_europe_by_aclevel <- final_data_europe_by_aclevel %>%
+  mutate(study_destination = "Europe")
+
+```
+
+```{r}
+final_data_europe_by_aclevel
+```
+
+
+
+```{r}
+names(final_data_europe_by_aclevel)[2] <- "Country"
+final_data_europe_by_aclevel$Country[final_data_europe_by_aclevel$Country == "Macao"] <- "Macau"
+final_data_europe_by_aclevel$Country[final_data_europe_by_aclevel$Country == "Brunei Darussalam"] <- "Brunei"
+final_data_europe_by_aclevel$Country[final_data_europe_by_aclevel$Country == "Myanmar/Burma"] <- "Burma/Myanmar"
+final_data_europe_by_aclevel$Country[final_data_europe_by_aclevel$Country == "Viet Nam"] <- "Vietnam"
+
+# Group by one more time 
+final_data_europe_by_aclevel1 <- final_data_europe_by_aclevel %>%
+  filter(Country %in% asian_countries) %>%
+  group_by(Academic_year, Country, study_destination, destination) %>%
+   summarise(total_students= sum(total_students_each_year, na.rm = TRUE))
+             
+final_data_europe_by_aclevel1$Academic_year <- as.numeric(final_data_europe_by_aclevel1$Academic_year)
+
+combined_data <- bind_rows(final_data_europe_by_aclevel1, final_data_us_by_aclevel) %>%
+  filter(Academic_year >= 2016& Academic_year <= 2023)
+```
+
+
+
+
+## 3/ Economic/Social indicators 
+
+### GDP (current $USD)
+```{r}
+gdp <- read.csv("GDP.csv", header = FALSE)
+# Remove the first 2 rows
+gdp1 <- gdp[-c(1,2), , drop = FALSE]
+
+# Use the first row as column names
+colnames(gdp1) <- as.character(unlist(gdp1[1, ]))
+
+# Remove the first row from the data
+gdp1 <- gdp1[-1, ]
+# Rename first column to Country
+colnames(gdp1)[1] <- "Country"
+# Remove the last missing column
+missing_col_index <- which(colnames(gdp1) == "" | is.na(colnames(gdp1)))
+missing_col_index
+gdp1 <- gdp1[, -missing_col_index]
+# Fix the countries naming for merging later
+gdp1$Country[gdp1$Country == "Macao"] <- "Macau"
+gdp1$Country[gdp1$Country == "Brunei Darussalam"] <- "Brunei"
+gdp1$Country[gdp1$Country == "Myanmar/Burma"] <- "Burma/Myanmar"
+gdp1$Country[gdp1$Country == "Korea, Rep."] <- "South Korea"
+gdp1$Country[gdp1$Country == "Korea, Dem. People's Rep."] <- "North Korea"
+gdp1$Country[gdp1$Country == "Viet Nam"] <- "Vietnam"
+gdp1$Country[gdp1$Country == "Lao PDR"] <- "Laos"
+gdp1$Country[gdp1$Country == "Myanmar"] <- "Burma/Myanmar"
+gdp1$Country[gdp1$Country == "Hong Kong SAR, China"] <- "Hong Kong"
+gdp1$Country[gdp1$Country == "Kyrgyz Republic"] <- "Kyrgyzstan"
+gdp1$Country[gdp1$Country == "Macao SAR, China"] <- "Macau"
+
+# Filter gdp1 based on those countries
+gdp1_filtered <- gdp1 %>% filter(Country %in% asian_countries)
+
+```
+
+
+
+
+```{r}
+# Change the year naming (ex: 2022/23 to 2023) and convert to numerical
+numeric_data <- gdp1_filtered %>%
+  select(Country, matches("^[0-9]{4}"))   # selects all 4-digit year columns
+
+# Step 2: Pivot all year columns into long format
+long_data <- numeric_data %>%
+  pivot_longer(
+    cols = -Country,          # pivot all except Country
+    names_to = "Academic_year",        # the column names become the 'year' variable
+    values_to = "gdp"         # the values become 'gdp'
+  )
+
+# Step 3: Sum GDP by country and year
+yearly_sum_df <- long_data %>%
+  group_by(Country, Academic_year) %>%
+  summarise(gdp = sum(gdp, na.rm = TRUE), .groups = "drop")
+yearly_sum_df$Academic_year <- as.numeric(yearly_sum_df$Academic_year)
+```
+
+### net_immigration
+```{r}
+net_immigration <- read.csv("net_immigration.csv", header = FALSE)
+# Remove the first 4 rows
+net_immigration1 <- net_immigration[-c(1:4), , drop = FALSE]
+
+# Use the first row as column names
+colnames(net_immigration1) <- as.character(unlist(net_immigration1[1, ]))
+
+# Remove the first row from the data
+net_immigration1 <- net_immigration1[-1, ]
+# Rename first column to Country
+colnames(net_immigration1)[1] <- "Country"
+# Filter gdp1 based on those countries
+
+net_immigration1$Country[net_immigration1$Country == "Macao"] <- "Macau"
+net_immigration1$Country[net_immigration1$Country == "Brunei Darussalam"] <- "Brunei"
+net_immigration1$Country[net_immigration1$Country == "Myanmar/Burma"] <- "Burma/Myanmar"
+net_immigration1$Country[net_immigration1$Country == "Korea, Rep."] <- "South Korea"
+net_immigration1$Country[net_immigration1$Country == "Korea, Dem. People's Rep."] <- "North Korea"
+net_immigration1$Country[net_immigration1$Country == "Viet Nam"] <- "Vietnam"
+net_immigration1$Country[net_immigration1$Country == "Lao PDR"] <- "Laos"
+net_immigration1$Country[net_immigration1$Country == "Myanmar"] <- "Burma/Myanmar"
+net_immigration1$Country[net_immigration1$Country == "Hong Kong SAR, China"] <- "Hong Kong"
+net_immigration1$Country[net_immigration1$Country == "Kyrgyz Republic"] <- "Kyrgyzstan"
+net_immigration1$Country[net_immigration1$Country == "Macao SAR, China"] <- "Macau"
+
+net_immigration1_filtered <- net_immigration1 %>% filter(Country %in% asian_countries)
+# 
+numeric_data1<- net_immigration1_filtered %>%
+  select(Country, matches("^[0-9]{4}"))   # selects all 4-digit year columns
+
+long_data1 <- pivot_longer(numeric_data1, 
+                          cols = -Country,
+                          names_to = "Academic_year",     # Convert column names (the years) into a "year" column
+                          values_to = "value")   # Corresponding values go into a "value" column
+
+# Step 3: Sum the values for each year
+yearly_sum_net_df <- long_data1 %>%
+  group_by(Country, Academic_year) %>%
+  summarise(total_value = sum(value, na.rm = TRUE))
+
+yearly_sum_net_df <- yearly_sum_net_df %>%
+  rename(net_immigration = total_value)  %>% filter(Country %in% asian_countries)
+
+
+yearly_sum_net_df$Academic_year <- as.numeric(yearly_sum_net_df$Academic_year)
+
+# Step 4: Print the resulting data
+print(yearly_sum_net_df)
+```
+
+
+
+### unemployment rate
+
+```{r}
+unemployment_rate <- read.csv("unemployment_rate.csv", header = FALSE)
+
+```
+
+
+
+```{r}
+# Remove the first 2 rows
+unemployment_rate1 <- unemployment_rate[-c(1,2), , drop = FALSE]
+
+# Use the first row as column names
+colnames(unemployment_rate1) <- as.character(unlist(unemployment_rate1[1, ]))
+
+# Remove the first row from the data
+unemployment_rate1 <- unemployment_rate1[-1, ]
+```
+
+
+
+
+
+```{r}
+colnames(unemployment_rate1)[1] <- "Country"
+# Re,move the last missing column
+missing_col_index2 <- which(colnames(unemployment_rate1) == "" | is.na(colnames(unemployment_rate1)))
+unemployment_rate1 <- unemployment_rate1[, -missing_col_index2]
+
+
+unemployment_rate1$Country[unemployment_rate1$Country == "Macao"] <- "Macau"
+unemployment_rate1$Country[unemployment_rate1$Country == "Brunei Darussalam"] <- "Brunei"
+unemployment_rate1$Country[unemployment_rate1$Country == "Myanmar/Burma"] <- "Burma/Myanmar"
+unemployment_rate1$Country[unemployment_rate1$Country == "Korea, Rep."] <- "South Korea"
+unemployment_rate1$Country[unemployment_rate1$Country == "Korea, Dem. People's Rep."] <- "North Korea"
+unemployment_rate1$Country[unemployment_rate1$Country == "Viet Nam"] <- "Vietnam"
+unemployment_rate1$Country[unemployment_rate1$Country == "Lao PDR"] <- "Laos"
+unemployment_rate1$Country[unemployment_rate1$Country == "Myanmar"] <- "Burma/Myanmar"
+unemployment_rate1$Country[unemployment_rate1$Country == "Hong Kong SAR, China"] <- "Hong Kong"
+unemployment_rate1$Country[unemployment_rate1$Country == "Kyrgyz Republic"] <- "Kyrgyzstan"
+unemployment_rate1$Country[unemployment_rate1$Country == "Macao SAR, China"] <- "Macau"
+
+
+# Filter gdp1 based on those countries
+unemployment_rate1_filtered <- unemployment_rate1 %>% filter(Country %in% asian_countries)
+# View the filtered data
+head(unemployment_rate1_filtered)
+```
+
+```{r}
+# Change the year naming (ex: 2022/23 to 2023) and convert to numerical
+numeric_data2<- unemployment_rate1_filtered %>%
+  select(Country, matches("^[0-9]{4}"))   # selects all 4-digit year columns
+
+long_data2 <- pivot_longer(numeric_data2, 
+                          cols = -Country,
+                          names_to = "Academic_year",     # Convert column names (the years) into a "year" column
+                          values_to = "value")   # Corresponding values go into a "value" column
+
+# Step 3: (Optional) Sum the values for each year
+yearly_sum_unemployment_df <- long_data2 %>%
+  group_by(Country, Academic_year) %>%
+  summarise(total_value = sum(value, na.rm = TRUE))
+
+yearly_sum_unemployment_df <- yearly_sum_unemployment_df %>%
+  rename(unemployment_rate = total_value)  %>% filter(Country %in% asian_countries)
+
+yearly_sum_unemployment_df$Academic_year <- as.numeric(yearly_sum_unemployment_df$Academic_year)
+
+```
+
+
+
+
+### Population
+
+```{r}
+population <- read.csv("population.csv", header = FALSE)
+
+```
+
+
+```{r}
+# Remove the first 2 rows
+population1 <- population[-c(1,2), , drop = FALSE]
+
+# Use the first row as column names
+colnames(population1) <- as.character(unlist(population1[1, ]))
+
+# Remove the first row from the data
+population1 <- population1[-1, ]
+
+```
+
+
+```{r}
+colnames(population1)[1] <- "Country"
+# Remove the last missing column
+missing_col_index2 <- which(colnames(population1) == "" | is.na(colnames(population1)))
+missing_col_index2
+population1 <- population1[, -missing_col_index2]
+
+
+population1$Country[population1$Country == "Macao"] <- "Macau"
+population1$Country[population1$Country == "Brunei Darussalam"] <- "Brunei"
+population1$Country[population1$Country == "Myanmar/Burma"] <- "Burma/Myanmar"
+population1$Country[population1$Country == "Korea, Rep."] <- "South Korea"
+population1$Country[population1$Country == "Korea, Dem. People's Rep."] <- "North Korea"
+population1$Country[population1$Country == "Viet Nam"] <- "Vietnam"
+population1$Country[population1$Country == "Lao PDR"] <- "Laos"
+population1$Country[population1$Country == "Myanmar"] <- "Burma/Myanmar"
+population1$Country[population1$Country == "Hong Kong SAR, China"] <- "Hong Kong"
+population1$Country[population1$Country == "Kyrgyz Republic"] <- "Kyrgyzstan"
+population1$Country[population1$Country == "Macao SAR, China"] <- "Macau"
+
+
+
+
+# Filter gdp1 based on those countries
+population1_filtered <- population1 %>% filter(Country %in% asian_countries)
+# View the filtered data
+head(population1_filtered)
+```
+```{r}
+# Change the year naming (ex: 2022/23 to 2023) and convert to numerical
+numeric_data3<- population1_filtered %>%
+  select(Country, matches("^[0-9]{4}"))   # selects all 4-digit year columns
+
+long_data3 <- pivot_longer(numeric_data3, 
+                          cols = -Country,
+                          names_to = "Academic_year",     # Convert column names (the years) into a "year" column
+                          values_to = "value")   # Corresponding values go into a "value" column
+
+# Step 3: (Optional) Sum the values for each year
+yearly_sum_population_df <- long_data3 %>%
+  group_by(Country, Academic_year) %>%
+  summarise(total_value = sum(value, na.rm = TRUE))
+
+yearly_sum_population_df <- yearly_sum_population_df %>%
+  rename(population = total_value)  %>% filter(Country %in% asian_countries)
+
+yearly_sum_population_df$Academic_year <- as.numeric(yearly_sum_population_df$Academic_year)
+```
+
+
+### 0DA scholarship data (UNESCO)
+
+```{r}
+scholarship <- read.csv("scholarship.csv", header = FALSE)
+
+```
+
+```{r}
+# Include full name of country of origin in the data set by 3-letters ( using data of World Bank) 
+
+scholarship1<- scholarship %>%
+  left_join(
+    population %>% 
+      select(Country = 1, match_value = 2),
+    by = c("V2" = "match_value")   # V2 = column 2 in scholarship
+  )
+
+# Change the countries name for consistency 
+scholarship1$Country[scholarship1$Country == "Lao PDR"] <- "Laos"
+scholarship1$Country[scholarship1$Country == "Brunei Darussalam"] <- "Brunei"
+scholarship1$Country[scholarship1$Country == "Viet Nam"] <- "Vietnam"
+scholarship1$Country[scholarship1$Country == "Myanmar"] <- "Burma/Myanmar"
+scholarship1$Country[scholarship1$Country == "Hong Kong SAR, China"] <- "Hong Kong"
+scholarship1$Country[scholarship1$Country == "Kyrgyz Republic"] <- "Kyrgyzstan"
+scholarship1$Country[scholarship1$Country == "Macao SAR, China"] <- "Macau"
+scholarship1$Country[scholarship1$Country == "Korea, Rep."] <- "South Korea"
+scholarship1$Country[scholarship1$Country == "Korea, Dem. People's Rep."] <- "North Korea"
+
+
+
+scholarship_ODA<- scholarship1%>%
+  rename(
+    Academic_year = 3,                  # Rename column 3 and 4
+    scholarship_ODA_volume = 4
+  ) %>%
+  select(-1, -2, -5, -6) %>%   # Remove columns 1, 2, 5, 6
+  slice(-1)     # Remove the unecessary first row
+# Only include countries of Asian students in this paper
+scholarship_ODA<- scholarship_ODA%>%
+  filter(Country %in% asian_countries)
+# Convert year & scholarship volume data to numeric type
+scholarship_ODA$Academic_year <- as.numeric(scholarship_ODA$Academic_year)
+scholarship_ODA$scholarship_ODA_volume <- as.numeric(scholarship_ODA$scholarship_ODA_volume)
+
+```
+
+
+
+
+```{r}
+# List of countries does not eligible for ODA scholarship -> scholarship data will appear as 0 later after joining
+setdiff(asian_countries, scholarship_ODA$Country)
+
+```
+
+
+
+## Joining economic/social indicators into mobility data
+
+#### * Perform a left join to add gdp, net_immigratiop, scholarship_ODA, total_unemployment_rate to combined_data based on 'year' and 'Academic_year'
+
+```{r}
+# Perform a left join to add gdp, net_immigration, population and  to combined_data based on 'year' and 'Academic_year'
+combined_data_with_total_value <- combined_data %>%
+  left_join(yearly_sum_df, by = c("Academic_year" = "Academic_year", "Country" = "Country")) %>%
+  left_join(yearly_sum_net_df, by = c("Academic_year" = "Academic_year", "Country" = "Country")) %>%
+  left_join(yearly_sum_unemployment_df, by = c("Academic_year" = "Academic_year", "Country" = "Country")) %>%
+  left_join(yearly_sum_population_df, by = c("Academic_year" = "Academic_year", "Country" = "Country")) %>%
+  left_join(scholarship_ODA, by = c("Academic_year" = "Academic_year", "Country" = "Country"))
+
+```
+
+
+```{r}
+# Replace missing value in scholarship become 0 
+combined_data_with_total_value$scholarship_ODA_volume[is.na(combined_data_with_total_value$scholarship_ODA_volume)] <- 0
+
+```
+```{r}
+# Create log(population)
+combined_data_with_total_value <- combined_data_with_total_value %>%
+  mutate(log_population = log(population))
+combined_data_with_total_value
+```
+
+
+
+#### * Perform a left join to add gdp, net_immigration, scholarship_ODA and total_unemployment_rate to combined_data based on 'year' and 'Academic_year' (remove column destination)
+```{r}
+combined_data1 <- combined_data %>%
+  group_by(Academic_year, Country, study_destination) %>%
+  summarize(total_students = sum(total_students, na.rm = TRUE), .groups = "drop")
+  
+# Perform a left join to add gdp, net_immigration and total_uemployment_rate to combined_data based on 'year' and 'Academic_year'
+combined_data_with_total_value1 <- combined_data1%>%
+  left_join(yearly_sum_df, by = c("Academic_year" = "Academic_year", "Country" = "Country")) %>%
+  left_join(yearly_sum_net_df, by = c("Academic_year" = "Academic_year", "Country" = "Country")) %>%
+  left_join(yearly_sum_unemployment_df, by = c("Academic_year" = "Academic_year", "Country" = "Country")) %>%
+  left_join(yearly_sum_population_df, by = c("Academic_year" = "Academic_year", "Country" = "Country")) %>%
+  left_join(scholarship_ODA, by = c("Academic_year" = "Academic_year", "Country" = "Country"))
+  
+```
+
+
+```{r}
+# Replace missing value in scholarship become 0 
+combined_data_with_total_value1$scholarship_ODA_volume[is.na(combined_data_with_total_value1$scholarship_ODA_volume)] <- 0
+```
+
+```{r}
+# Create log(population)
+combined_data_with_total_value1 <- combined_data_with_total_value1 %>%
+  mutate(log_population = log(population))
+combined_data_with_total_value1
+
+```
+
+
+# II/ Discussion & Interpreation
+
+## Checking residuals & Adjustment
+```{r}
+combined_data_with_total_value2 <- combined_data_with_total_value1 %>%
+  filter(scholarship_ODA_volume != 0) %>%   # exclude rows with 0 scholarships
+  arrange(study_destination, Academic_year) %>%
+  group_by(study_destination) %>%
+  mutate(pct_change_students = (total_students - lag(total_students)) / lag(total_students) * 100) %>%
+  ungroup()
+
+
+
+# Create binary columns for Country
+country_binary <- model.matrix(~ Country - 1, data = combined_data_with_total_value2)
+# Create binary columns for Study destination
+destination_binary <- model.matrix(~ study_destination - 1, data = combined_data_with_total_value2)
+
+# Combine with original data (excluding original categorical columns)
+selected_data_binary <- cbind(
+  combined_data_with_total_value2 %>% select(-Country, -study_destination, -total_students),
+  country_binary,
+  destination_binary
+)
+# Regression model of all data set
+lm_preliminary_result <- lm(pct_change_students ~., selected_data_binary)
+summary(lm_preliminary_result)
+```
+
+
+
+
+### Check the normality of the regression model
+```{r}
+# Residual plot
+plot(lm_preliminary_result, which = 1)
+```
+
+### Identify the residuals' location
+```{r}
+# Compute residuals
+res <- residuals(lm_preliminary_result)
+
+# For find all residuals above a certain threshold
+threshold <- 50000  # Base on the residual plot
+problematic_rows <- which(abs(res) > threshold)
+
+# View the actual data points causing the problem
+lm_preliminary_result$model[problematic_rows, ]
+```
+
+Base on the actual data points causing the problem, these data are coming from Pakistan. Therefore, we will remove it for accuracy, which means there will be 30 Asian countries afterward.
+
+### Re-check residual
+```{r}
+# Remove Pakistan
+combined_data_with_total_value3 <- combined_data_with_total_value1 %>%
+  filter(!Country %in% c("Pakistan"))
+
+combined_data_with_total_value4 <- combined_data_with_total_value3 %>%
+    filter(scholarship_ODA_volume != 0) %>%   # exclude rows with 0 scholarships
+  arrange(study_destination, Academic_year) %>%
+  group_by(study_destination) %>%
+  mutate(pct_change_students = (total_students - lag(total_students)) / lag(total_students) * 100) %>%
+  ungroup()
+
+# Create binary columns for Country
+country_binary <- model.matrix(~ Country - 1, data = combined_data_with_total_value4)
+# Create binary columns for Study destination
+destination_binary <- model.matrix(~ study_destination - 1, data = combined_data_with_total_value4)
+
+# Combine with original data (excluding original categorical columns)
+selected_data_binary <- cbind(
+  combined_data_with_total_value4 %>% select(-Country, -study_destination, -total_students),
+  country_binary,
+  destination_binary
+)
+# Regression model of all data set
+lm_preliminary_result <- lm(pct_change_students ~., selected_data_binary)
+summary(lm_preliminary_result)
+```
+
+
+```{r}
+# Residual plot
+
+plot(lm_preliminary_result, which = 1)
+
+```
+
+Based on the second residual vs. fitted plot, the residuals still become spread out gradually after 50000. Therefore, running a second residual vs. fitted plot for one more time is essential
+
+### Identify the residuals' location
+```{r}
+# Compute residuals
+res <- residuals(lm_preliminary_result)
+
+threshold <- 50000
+
+# Find rows with residuals outside the range
+problematic_rows <- which(abs(res) > threshold)
+
+# View the actual data points causing the problem
+lm_preliminary_result$model[problematic_rows, ]
+```
+
+We can see that Philippines is also contributing to the heteroskedasticity of the plot, so we will remove remove this country from data set.
+ 
+### Re-check residual one last time
+```{r}
+# Remove Pakistan & Philippines
+combined_data_with_total_value5<- combined_data_with_total_value3%>%
+  filter(!Country %in% c("Pakistan", "Philippines"))
+
+combined_data_with_total_value6<- combined_data_with_total_value5%>%
+    filter(scholarship_ODA_volume != 0) %>%   # exclude rows with 0 scholarships
+  arrange(study_destination, Academic_year) %>%
+  group_by(study_destination) %>%
+  mutate(pct_change_students = (total_students - lag(total_students)) / lag(total_students) * 100) %>%
+  ungroup()
+
+# Create binary columns for Country
+country_binary <- model.matrix(~ Country - 1, data = combined_data_with_total_value6)
+# Create binary columns for Study destination
+destination_binary <- model.matrix(~ study_destination - 1, data = combined_data_with_total_value6)
+
+# Combine with original data (excluding original categorical columns)
+selected_data_binary <- cbind(
+  combined_data_with_total_value6 %>% select(-Country, -study_destination, -total_students),
+  country_binary,
+  destination_binary
+)
+# Regression model of all data set
+lm_preliminary_result <- lm(pct_change_students ~., selected_data_binary)
+summary(lm_preliminary_result)
+```
+ 
+```{r}
+# Residual plot
+plot(
+  lm_preliminary_result,
+  which = 1,
+  main = "Linear regression of stuents change model",
+  sub = "All Other Predictors"
+)
+```
+ 
+ 
+
+ 
+```{r}
+
+#  Aggregate total students by year and study destination ( calculate percentage change over years for each countries)
+aggregated_data <- combined_data_with_total_value5 %>%
+  group_by(Academic_year, study_destination) %>%
+  summarise(total_students = sum(total_students, na.rm = TRUE)) %>%
+  arrange(study_destination, Academic_year) %>%
+  group_by(study_destination) %>%
+  # Compute year-over-year % change
+  mutate(pct_change_students = (total_students - lag(total_students)) / lag(total_students) * 100) %>%
+  ungroup()
+
+# Plot % change over time
+ggplot(aggregated_data, aes(x = Academic_year, y = pct_change_students, 
+                            color = study_destination, group = study_destination)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+   geom_vline(xintercept = 2020, linetype = "dashed", color = "black", size = 0.8) +
+  annotate("text", x = 2020.2, y = max(aggregated_data$pct_change_students, na.rm = TRUE),
+           label = "COVID-19 Travel restrictions ", hjust = 0, vjust = 1, size = 2.7, color = "black") +
+  labs(
+    title = "Figure 1: Percentage change in Total Students",
+    subtitle = "from 29 Asian countries",
+    x = "Year",
+    y = "Change in Total Students (%)",
+    color = "Study Destination"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 12,  hjust = 0.5),
+        plot.subtitle = element_text(size = 12, hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+ 
+ 
+ 
+## Line plot of students studying abroad in United States from 2016 to 2023
+```{r}
+df_us_inflows <- combined_data_with_total_value6 %>%
+  # Filter for only the United States as the study destination
+  filter(study_destination == "United States") %>%
+    group_by(Academic_year) %>%
+    summarise(Total_Students_US = sum(total_students, na.rm = TRUE)) %>%
+  ungroup()
+```
+
+ 
+```{r}
+us_plot <- ggplot(df_us_inflows, aes(x = Academic_year, y = Total_Students_US)) +
+  geom_line(color = "black", linewidth = 1.2) +    labs(
+    title = "United States",
+    x = "Academic Year",
+    y = "Total Number of Students"
+  )+
+  theme_minimal()+
+  theme(
+    plot.title = element_text(size = 10),      
+    axis.title.x = element_text(size = 10),  
+    axis.title.y = element_text(size = 10),    
+    axis.text.x = element_text(size = 8),     
+    axis.text.y = element_text(size = 8)       
+  )
+
+us_plot
+```
+
+ 
+
+ 
+ 
+ 
+ 
+```{r}
+# Top 2 in dataset has the highest number of Asian students studying
+combined_data_with_total_value7 <- combined_data_with_total_value %>%
+  filter(!Country %in% c("Pakistan", "Philippines"))
+
+df_germany_inflows <- combined_data_with_total_value7 %>%
+  # Filter for only the Germany as the study destination
+  filter(destination== "Germany") %>%
+    group_by(Academic_year) %>%
+    summarise(Total_Students_Germany = sum(total_students, na.rm = TRUE)) %>%
+  ungroup()
+```
+
+
+
+
+```{r}
+germany_plot <- ggplot(df_germany_inflows, aes(x = Academic_year, y = Total_Students_Germany)) +
+  geom_line(color = "black", linewidth = 1.2) +    labs(
+    title = "Germany",
+    x = "Academic Year",
+    y = "Total Number of Students"
+  ) +
+  theme_minimal()+
+  theme(
+    plot.title = element_text(size = 10),      
+    axis.title.x = element_text(size = 10),  
+    axis.title.y = element_text(size = 10),    
+    axis.text.x = element_text(size = 8),     
+    axis.text.y = element_text(size = 8)       
+  )
+
+germany_plot <- germany_plot +
+  scale_y_continuous(labels = label_comma())
+
+```
+
+ 
+ 
+```{r}
+# Top 3 in dataset has the highest number of Asian students studying
+df_france_inflows <- combined_data_with_total_value7 %>%
+  # Filter for only the Germany as the study destination
+  filter(destination== "France") %>%
+    group_by(Academic_year) %>%
+    summarise(Total_Students_France = sum(total_students, na.rm = TRUE)) %>%
+  ungroup()
+```
+
+
+
+ 
+```{r}
+# Top 3 in dataset has the highest number of Asian students studying
+france_plot <- ggplot(df_france_inflows, aes(x = Academic_year, y = Total_Students_France)) +
+  geom_line(color = "black", linewidth = 1.2) +    labs(
+    title = "France",
+    x = "Academic Year",
+    y = "Total Number of Students"
+  ) +
+  theme_minimal()+
+  theme(
+    plot.title = element_text(size = 10),      
+    axis.title.x = element_text(size = 10),  
+    axis.title.y = element_text(size = 10),    
+    axis.text.x = element_text(size = 8),     
+    axis.text.y = element_text(size = 8)       
+  )
+
+
+```
+
+
+
+
+
+```{r}
+# Find the top 5 destination
+# Turkiye has naming error, so we will fix by UTF8
+combined_data_with_total_value7$destination[
+  combined_data_with_total_value7$destination == "T\xfcrkiye"
+] <- "Türkiye"
+
+
+top5_dest <- combined_data_with_total_value7 %>%
+  group_by(destination) %>%
+  summarise(total_students_sum = sum(total_students, na.rm = TRUE)) %>%
+  arrange(desc(total_students_sum)) %>%
+  slice_head(n = 5) %>%
+  pull(destination)
+
+filtered_data <- combined_data_with_total_value7 %>%
+  filter(destination %in% top5_dest)
+
+plot_data <- filtered_data %>%
+  group_by(Academic_year) %>%
+  summarise(total_students = sum(total_students, na.rm = TRUE), .groups = "drop")
+
+
+
+top5_plot <- ggplot(plot_data, 
+       aes(x = Academic_year, 
+           y = total_students, )) +
+  geom_line(size = 1.2) +
+  labs(
+    title = "Top 5 Destinations",
+    x = "Academic Year",
+    y = "Total Students"
+  ) +
+  theme_minimal()+
+  theme(
+    plot.title = element_text(size = 10),     
+    axis.title.x = element_text(size = 10),  
+    axis.title.y = element_text(size = 10),    
+    axis.text.x = element_text(size = 8),     
+    axis.text.y = element_text(size = 8)       
+  )
+
+top5_plot
+
+```
+
+
+#### Show all plots in 1 place
+```{r}
+combined_plot <- (us_plot | germany_plot) / (france_plot | top5_plot) +
+  plot_annotation(title = "Figure 2: Comparative Visualization of Top 1, 2, 3 &  Top 5 Study Destinations of Asian students",
+                  theme = theme(
+      plot.title = element_text(size = 10, face = "bold", hjust = 0.5) # adjust size here
+    )
+  )
+combined_plot
+```
+
+# Decide DiD (Difference-in-Differences) type
+
+### DiD before vs after 2020 (Europe as treated group)\
+
+Because we focus on comparing only two study destinations (Europe vs United States). Therefore, a simple pairwise DiD is not suitable, and using a fixed-effects DiD with country and year controls will provide a cleaner and more robust estimate of the effect while accounting for overall differences across countries and time trends.
+
+```{r}
+
+# Combine with original data (excluding original categorical columns)
+selected_data_binary4 <- cbind(
+  combined_data_with_total_value6 %>% select(-study_destination, -total_students),
+  destination_binary
+)
+```
+
+
+
+```{r}
+# Create dummy variable post2020 for selected_data_binary4
+selected_data_binary5<- selected_data_binary4 %>%
+  mutate(
+    post2020 = ifelse(Academic_year >= 2020, 1, 0)
+  )
+# Fixed effect of studying in Europe after 2020 on pct_change_students, controlling for other country/year-level covariates
+did_fe <- feols(
+  pct_change_students ~ post2020 * study_destinationEurope +
+    gdp + net_immigration + population + unemployment_rate +
+    scholarship_ODA_volume + log_population |
+    Country + Academic_year,
+  data = selected_data_binary5
+)
+
+etable(did_fe)
+```
+
+```{r}
+summary(did_fe, vcov = "HC1")  # robust standard errors
+
+```
+ 
+
+ 
+ 
+```{r}
+
+# Fit the model
+lm_model <- lm(pct_change_students ~ . - population, data = selected_data_binary5)
+
+# Robust variance-covariance
+robust_vcov <- vcovHC(lm_model, type = "HC3")
+
+# Robust coeftest
+robust_summary <- coeftest(lm_model, vcov = robust_vcov)
+
+# Convert to a tidy data frame safely
+ci_df <- data.frame(
+  term = rownames(robust_summary),
+  Estimate = robust_summary[, 1],
+  Std_Error = robust_summary[, 2],
+  t_value = robust_summary[, 3],
+  P_value = robust_summary[, 4]
+) %>%
+  filter(str_detect(term, "^Country")) %>%  # keep only country dummies
+  mutate(
+    Country = str_remove(term, "^Country"),
+    Lower_CI = Estimate - 1.96 * Std_Error,
+    Upper_CI = Estimate + 1.96 * Std_Error
+  ) %>%
+  arrange(Estimate) %>%
+  mutate(Country = factor(Country, levels = Country))
+
+# Forest plot
+forest_plot <- ggplot(ci_df, aes(x = Estimate, y = Country)) +
+  geom_errorbarh(aes(xmin = Lower_CI, xmax = Upper_CI), height = 0.2, linewidth = 1, color = "grey") +
+  geom_point(size = 3, color = "black") +
+  geom_point(data = filter(ci_df, P_value < 0.05), size = 3, color = "red") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red", linewidth = 0.8) +
+  labs(
+    title = "How Each Country's Student Growth Compares to Maldives (95% CI)",
+    subtitle = paste("Reference Country:", ci_df$Country[1]),
+    x = "Effect on Pct Change Students",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(plot.title.position = "plot")
+
+print(forest_plot)
+
+
+```
+
+```{r}
+# 2. Create an event_time variable centered around the treatment year (2020)
+# This creates a variable where: ... -2 (2018), -1 (2019), 0 (2020), 1 (2021), 2 (2022) ...
+selected_data_binary5 <- selected_data_binary5 %>%
+  mutate(event_time = Academic_year - 2020)
+
+# 3. Set the reference period (pre-treatment) to 2019 (event_time = -1)
+selected_data_binary5$event_time_factor <- factor(selected_data_binary5$event_time)
+selected_data_binary5$event_time_factor <- relevel(selected_data_binary5$event_time_factor, ref = "-1")
+
+# 4. Run the Event Study DiD model
+event_study <- feols(
+  pct_change_students ~ i(event_time_factor, study_destinationEurope, ref = "-1") +
+    gdp + net_immigration + population + unemployment_rate +
+    scholarship_ODA_volume + log_population |
+    Country + Academic_year, # Include all fixed effects
+  data = selected_data_binary5,
+  cluster = ~Country # Use clustered standard errors for robust inference
+)
+
+# Plot Event Study
+iplot(
+  event_study,
+  ci_level = 0.95,                 
+  xlab = "Years Relative to 2020",
+  ylab = "Effect on % Change in Students",
+  main = "Event Study: Effect of Study Destination Europe on Student Flows",
+  ref.line = 0,
+  col = "black",
+  lwd = 2
+)
+
+# Add subtitle below the title
+mtext(
+  "Using 2019 as reference year (0 in x-axis), clustered by 23 Countries receiving ODA scholarship",
+  side = 3,      # top
+  line = 0.5,    # distance from main title
+  cex = 0.7      # size of subtitle
+)
+
+```
+
+
+
